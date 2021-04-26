@@ -27,6 +27,10 @@ enum Operation
     FAILD
 };
 
+pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
+time_t start_time;
+time_t nsecs;
+
 void print_usage()
 {
     printf("\n"
@@ -80,24 +84,45 @@ void *make_request(void *arg)
 {
     int pnp;
     int np = ((int *)arg)[1];
+    pthread_t tid = pthread_self();
+    pid_t pid = getpid();
     Message msg;
     msg.rid = ((int *)arg)[0]; // we need to pass current_rid
-    msg.tid = pthread_self();
-    msg.pid = getpid();
+    msg.tid = tid;
+    msg.pid = pid;
     msg.tskload = 1 + (rand() % 9);
     msg.tskres = -1;
+
+    pthread_mutex_lock(&mut);
+    operation_register(IWANT, msg);
+    write(np, &msg, sizeof(Message));
+    pthread_mutex_unlock(&mut);
 
     //char *private_fifo_name = (char *)malloc((7 + floor(log10((double) msg.pid)) + 1 + floor(log10((double) msg.tid)) + 1) * sizeof(char));
     char *private_fifo_name = (char *)malloc(40 * sizeof(char));
     sprintf(private_fifo_name, "/tmp/%d.%lu", msg.pid, msg.tid);
     mkfifo(private_fifo_name, 0666);
 
-    operation_register(IWANT, msg);
-    write(np, &msg, sizeof(Message)); //we need to pass np
+    int read_no = -1;
+    //read(pnp, &msg, sizeof(Message));
 
-    while ((pnp = open(private_fifo_name, O_RDONLY)) < 0)
-        ;
-    read(pnp, &msg, sizeof(Message));
+    while ((pnp = open(private_fifo_name, O_RDONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) < nsecs);
+
+    while (read_no <= 0 && (time(NULL) - start_time) < nsecs){
+        read_no = read(pnp, &msg, sizeof(Message));
+    }
+
+    if(read_no == -1 || read_no == 0){
+        operation_register(GAVUP, msg);
+        close(pnp);
+        unlink(private_fifo_name);
+        free(private_fifo_name);
+        return NULL;
+    }
+
+    msg.pid = pid;
+    msg.tid = tid;
+
     if (msg.tskres == -1)
     {
         operation_register(CLOSD, msg);
@@ -114,6 +139,7 @@ void *make_request(void *arg)
 
 int main(int argc, char *argv[], char *envp[])
 { //argc inclui nome do programa vai ter sempre de ser 4
+    start_time = time(NULL);
     if (argc != 4)
     {
         error(EXIT_FAILURE, EINVAL, "incorrect number of arguments");
@@ -123,7 +149,7 @@ int main(int argc, char *argv[], char *envp[])
         error(EXIT_FAILURE, EINVAL, "incorrect argument");
     }
 
-    int nsecs = atoi(argv[2]);
+    nsecs = atoi(argv[2]);
     if (nsecs <= 0)
     {
         error(EXIT_FAILURE, EINVAL, "invalid time");
@@ -132,18 +158,24 @@ int main(int argc, char *argv[], char *envp[])
     char *fifo_name = argv[3];
     int np;
 
-    while ((np = open(fifo_name, O_WRONLY)) < 0)
+    while ((np = open(fifo_name, O_WRONLY)) < 0 && (time(NULL) - start_time) < nsecs)
         ;
 
+    //pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
     pthread_t tid;
     int current_rid = 0;
-    int arg[2] = {current_rid++, np};
-
     int errn;
-    if ((errn = pthread_create(&tid, NULL, make_request, (void *)arg)) != OK)
-    {
-        error(EXIT_FAILURE, errn, "cannot create a new thread");
+    int arg[2];
+    
+    while ((time(NULL) - start_time) < nsecs) {
+        arg[0] = current_rid++;
+        arg[1] = np;
+        if ((errn = pthread_create(&tid, NULL, make_request, arg)) != OK)
+        {
+            error(EXIT_FAILURE, errn, "cannot create a new thread");
+        }
+        usleep(1000 * (rand() % 50));
     }
-
-    sleep(5);
+    
+    printf("Elapsed time: %ld s\n", time(NULL) - start_time);
 }
