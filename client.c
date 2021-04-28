@@ -28,8 +28,10 @@ enum Operation
 };
 
 pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
+int np;
 time_t start_time;
 time_t nsecs;
+bool server_closed;
 
 void print_usage()
 {
@@ -82,21 +84,27 @@ void operation_register(enum Operation op, Message msg)
 
 void *make_request(void *arg)
 {
+    Message msg;
+    msg.rid = *(int *)arg;
     int pnp;
-    int np = ((int *)arg)[1];
     pthread_t tid = pthread_self();
     pid_t pid = getpid();
-    Message msg;
-    msg.rid = ((int *)arg)[0]; // we need to pass current_rid
     msg.tid = tid;
     msg.pid = pid;
     msg.tskload = 1 + (rand() % 9);
     msg.tskres = -1;
 
     pthread_mutex_lock(&mut);
-    operation_register(IWANT, msg);
-    write(np, &msg, sizeof(Message));
+    if (write(np, &msg, sizeof(Message)) != OK && errno == EAGAIN){
+        server_closed = true;
+    }
     pthread_mutex_unlock(&mut);
+    
+    if(server_closed){
+        return NULL;
+    }
+
+    operation_register(IWANT, msg);
 
     //char *private_fifo_name = (char *)malloc((7 + floor(log10((double) msg.pid)) + 1 + floor(log10((double) msg.tid)) + 1) * sizeof(char));
     char *private_fifo_name = (char *)malloc(40 * sizeof(char));
@@ -106,13 +114,16 @@ void *make_request(void *arg)
     int read_no = -1;
     //read(pnp, &msg, sizeof(Message));
 
-    while ((pnp = open(private_fifo_name, O_RDONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) < nsecs);
+    while ((pnp = open(private_fifo_name, O_RDONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) < nsecs)
+    ;
 
-    while (read_no <= 0 && (time(NULL) - start_time) < nsecs){
+    while (read_no <= 0 && (time(NULL) - start_time) < nsecs)
+    {
         read_no = read(pnp, &msg, sizeof(Message));
     }
 
-    if(read_no == -1 || read_no == 0){
+    if (read_no == -1 || read_no == 0)
+    {
         operation_register(GAVUP, msg);
         close(pnp);
         unlink(private_fifo_name);
@@ -156,26 +167,30 @@ int main(int argc, char *argv[], char *envp[])
     }
 
     char *fifo_name = argv[3];
-    int np;
 
-    while ((np = open(fifo_name, O_WRONLY)) < 0 && (time(NULL) - start_time) < nsecs)
+    while ((np = open(fifo_name, O_WRONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) < nsecs)
         ;
 
-    //pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
+    server_closed = false;
+
     pthread_t tid;
     int current_rid = 0;
     int errn;
-    int arg[2];
-    
-    while ((time(NULL) - start_time) < nsecs) {
-        arg[0] = current_rid++;
-        arg[1] = np;
+    //int arg[2];
+    int *arg;
+
+    while ((time(NULL) - start_time) < nsecs && !server_closed)
+    {
+        arg = (int *)malloc(sizeof(int));
+        *arg = current_rid++;
         if ((errn = pthread_create(&tid, NULL, make_request, arg)) != OK)
         {
             error(EXIT_FAILURE, errn, "cannot create a new thread");
         }
         usleep(1000 * (rand() % 50));
     }
-    
+
+    sleep(1);
+    pthread_mutex_destroy(&mut);
     printf("Elapsed time: %ld s\n", time(NULL) - start_time);
 }
