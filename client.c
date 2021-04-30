@@ -85,18 +85,11 @@ void *make_request(void *arg)
     msg.tskres = -1;
 
     pthread_mutex_lock(&mut);
-    if (write(np, &msg, sizeof(Message)) == -1)
+    if (write(np, &msg, sizeof(Message)) < 0)
     {
-        if (errno == EPIPE || errno == EAGAIN)
-        {
-            server_closed = true;
-        }
-        else
-        {
-            perror("cannot write to public fifo");
-            pthread_mutex_unlock(&mut);
-            return NULL;
-        }
+        server_closed = true;
+        pthread_mutex_unlock(&mut);
+        return NULL;
     }
     pthread_mutex_unlock(&mut);
 
