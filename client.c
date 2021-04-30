@@ -85,7 +85,7 @@ void *make_request(void *arg)
     msg.tskres = -1;
 
     pthread_mutex_lock(&mut);
-    if (write(np, &msg, sizeof(Message)) < 0)
+    if (write(np, &msg, sizeof(Message)) <= 0)
     {
         server_closed = true;
         pthread_mutex_unlock(&mut);
