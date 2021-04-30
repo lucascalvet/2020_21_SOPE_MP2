@@ -153,6 +153,7 @@ void *make_request(void *arg)
     {
         if (msg.tskres == -1)
         {
+            server_closed = true;
             operation_register(CLOSD, msg);
         }
         else
