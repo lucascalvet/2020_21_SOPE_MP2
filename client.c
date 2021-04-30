@@ -9,6 +9,7 @@
 #include <string.h>
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include "./common.h"
 
 #define OK 0
@@ -22,11 +23,12 @@ enum Operation
     GAVUP
 };
 
-pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
-int np;
-time_t start_time;
-time_t nsecs;
-bool server_closed;
+static pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
+static int np;
+static time_t start_time;
+static time_t nsecs;
+static sigset_t signal_mask;
+static bool server_closed;
 
 void print_usage()
 {
@@ -85,8 +87,10 @@ void *make_request(void *arg)
     pthread_mutex_lock(&mut);
     if (write(np, &msg, sizeof(Message)) == -1)
     {
-        if (errno == EAGAIN)
+        if (errno == EPIPE || errno == EAGAIN)
+        {
             server_closed = true;
+        }
         else
         {
             perror("cannot write to public fifo");
@@ -117,15 +121,11 @@ void *make_request(void *arg)
 
     while ((pnp = open(private_fifo_name, O_RDONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) <= nsecs)
     {
-        if (errno != EWOULDBLOCK)
+        if (server_closed || errno != EWOULDBLOCK)
         {
             unlink(private_fifo_name);
-            perror("cannot open private fifo");
-            return NULL;
-        }
-        if (server_closed)
-        {
-            unlink(private_fifo_name);
+            if (!server_closed)
+                perror("cannot open private fifo");
             return NULL;
         }
     }
@@ -137,7 +137,8 @@ void *make_request(void *arg)
         {
             close(pnp);
             unlink(private_fifo_name);
-            perror("cannot read private fifo");
+            if (!server_closed)
+                perror("cannot read private fifo");
             return NULL;
         }
     }
@@ -153,7 +154,8 @@ void *make_request(void *arg)
     msg.pid = pid;
     msg.tid = tid;
 
-    if (!server_closed){
+    if (!server_closed)
+    {
         if (msg.tskres == -1)
         {
             operation_register(CLOSD, msg);
@@ -163,7 +165,7 @@ void *make_request(void *arg)
             operation_register(GOTRS, msg);
         }
     }
-    
+
     close(pnp);
     unlink(private_fifo_name);
     return NULL;
@@ -207,6 +209,13 @@ int main(int argc, char *argv[], char *envp[])
     int errn;
     int *arg;
     unsigned seed = time(NULL);
+
+    sigemptyset(&signal_mask);
+    sigaddset(&signal_mask, SIGPIPE);
+    if (pthread_sigmask(SIG_BLOCK, &signal_mask, NULL) != OK)
+    {
+        error(EXIT_FAILURE, errno, "pthread_sigmask failed");
+    }
 
     while ((time(NULL) - start_time) <= nsecs && !server_closed)
     {
