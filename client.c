@@ -94,11 +94,12 @@ void *make_request(void *arg)
     }
     pthread_mutex_unlock(&mut);
 
+    /*
     if (server_closed)
     {
         printf("Server Closed\n");
         return NULL;
-    }
+    }*/
 
     operation_register(IWANT, msg);
 
