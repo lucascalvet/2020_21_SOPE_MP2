@@ -130,7 +130,7 @@ void *make_request(void *arg)
         }
     }
 
-    int read_no = -1;
+    int read_no;
     while ((read_no = read(pnp, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs)
     {
         if (server_closed || (read_no == -1 && errno != EAGAIN))
