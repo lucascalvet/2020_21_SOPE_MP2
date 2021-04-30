@@ -87,6 +87,7 @@ void *make_request(void *arg)
     pthread_mutex_lock(&mut);
     if (write(np, &msg, sizeof(Message)) < 0)
     {
+        printf("Closing Server\n");
         server_closed = true;
         pthread_mutex_unlock(&mut);
         return NULL;
@@ -95,6 +96,7 @@ void *make_request(void *arg)
 
     if (server_closed)
     {
+        printf("Server Closed\n");
         return NULL;
     }
 
@@ -212,6 +214,12 @@ int main(int argc, char *argv[], char *envp[])
 
     while ((time(NULL) - start_time) <= nsecs && !server_closed)
     {
+        if(server_closed){
+            printf("SC\n");
+        }
+        else{
+            printf("SO\n");
+        }
         arg = (int *)malloc(sizeof(int));
         if (arg == NULL)
         {
