@@ -89,6 +89,7 @@ void *make_request(void *arg)
     {
         server_closed = true;
         pthread_mutex_unlock(&mut);
+        perror("write failed");
         return NULL;
     }
     pthread_mutex_unlock(&mut);
