@@ -116,7 +116,7 @@ void *make_request(void *arg)
 
     while ((pnp = open(private_fifo_name, O_RDONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) <= nsecs)
     {
-        if (server_closed || errno != EWOULDBLOCK)
+        if (errno != EWOULDBLOCK)
         {
             unlink(private_fifo_name);
             if (!server_closed)
@@ -128,7 +128,7 @@ void *make_request(void *arg)
     int read_no;
     while ((read_no = read(pnp, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs)
     {
-        if (server_closed || (read_no == -1 && errno != EAGAIN))
+        if (read_no == -1 && errno != EAGAIN)
         {
             close(pnp);
             unlink(private_fifo_name);
@@ -138,7 +138,7 @@ void *make_request(void *arg)
         }
     }
 
-    if (!server_closed && ((read_no == 0 || read_no == -1) && (time(NULL) - start_time) > nsecs))
+    if ((read_no == 0 || read_no == -1) && (time(NULL) - start_time) > nsecs)
     {
         operation_register(GAVUP, msg);
         close(pnp);
@@ -149,18 +149,17 @@ void *make_request(void *arg)
     msg.pid = pid;
     msg.tid = tid;
 
-    if (!server_closed)
+    
+    if (msg.tskres == -1)
     {
-        if (msg.tskres == -1)
-        {
-            server_closed = true;
-            operation_register(CLOSD, msg);
-        }
-        else
-        {
-            operation_register(GOTRS, msg);
-        }
+        server_closed = true;
+        operation_register(CLOSD, msg);
     }
+    else
+    {
+        operation_register(GOTRS, msg);
+    }
+
 
     close(pnp);
     unlink(private_fifo_name);
