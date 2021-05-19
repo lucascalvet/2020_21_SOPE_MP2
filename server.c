@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include "./common.h"
+#include "lib.h"
 
 #define OK 0
 #define DEFAULT_BUFFER_SIZE 10
@@ -60,7 +61,7 @@ void operation_register(enum Operation op, Message msg)
         print_result = snprintf(op_str, sizeof(op_str), "TSKDN");
         break;
     case TLATE:
-        print_result = snprintf(op_str, sizeof(op_str), "TLATE");
+        print_result = snprintf(op_str, sizeof(op_str), "2LATE");
         break;
     case FAILD:
         print_result = snprintf(op_str, sizeof(op_str), "FAILD");
@@ -84,14 +85,12 @@ void *consumer(void *arg)
 {
     unsigned bal;
     Message msg;
-    Message msg_send;
     while ((time(NULL) - start_time) <= nsecs)
     {
-
-        phtread_mutex_lock(&balance_mut);
+        pthread_mutex_lock(&balance_mut);
         bal = balance;
-        phtread_mutex_unlock(&balance_mut);
-        if (balance > 0)
+        pthread_mutex_unlock(&balance_mut);
+        if (bal > 0)
         {
             msg = buffer[buffer_front_index];
             buffer_front_index++;
@@ -104,7 +103,7 @@ void *consumer(void *arg)
                 perror("snprintf failed");
                 return NULL;
             }
-
+            int pnp;
             while ((pnp = open(private_fifo_name, O_WRONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) <= nsecs)
             {
                 if (errno != EWOULDBLOCK)
@@ -116,22 +115,48 @@ void *consumer(void *arg)
             }
             msg.pid = getpid();
             msg.tid = pthread_self();
-            int read_no;
-            while ((read_no = write(pnp, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs)
+            int write_no = 0;
+            while ((write_no = write(pnp, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs)
             {
-                if (read_no == -1 && errno != EAGAIN)
+                if (write_no == -1 && errno != EAGAIN)
                 {
                     close(pnp);
                     //if (!server_closed)
-                    perror("cannot read private fifo");
+                    perror("cannot write to private fifo");
                     return NULL;
                 }
             }
-            phtread_mutex_lock(&balance_mut);
+
+            if ((write_no == 0 || write_no == -1) && (time(NULL) - start_time) > nsecs)
+            {
+                operation_register(FAILD, msg);
+                close(pnp);
+                return NULL;
+            }
+
+            operation_register(TSKDN, msg);
+
+            pthread_mutex_lock(&balance_mut);
             balance--;
-            phtread_mutex_unlock(&balance_mut);
+            pthread_mutex_unlock(&balance_mut);
         }
     }
+    pthread_mutex_lock(&balance_mut);
+        bal = balance;
+    pthread_mutex_unlock(&balance_mut);
+    while (bal > 0)
+    {
+        msg = buffer[buffer_front_index];
+        buffer_front_index++;
+        if (buffer_front_index == buffer_size)
+            buffer_front_index -= buffer_size;
+        operation_register(TLATE, msg);
+        pthread_mutex_lock(&balance_mut);
+        balance--;
+        bal = balance;
+        pthread_mutex_unlock(&balance_mut);
+    }
+    return NULL;
 }
 
 void *producer(void *arg)
@@ -141,34 +166,37 @@ void *producer(void *arg)
     Message message = *(Message *)arg;
 
     message.tskres = task(message.tskload);
+    operation_register(TSKEX, message);
     while ((time(NULL) - start_time) <= nsecs)
     {
-        phtread_mutex_lock(&balance_mut);
+        pthread_mutex_lock(&balance_mut);
         bal = balance;
-        phtread_mutex_unlock(&balance_mut);
+        pthread_mutex_lock(&balance_mut);
 
         if (bal < buffer_size)
         {
-            phtread_mutex_lock(&backindex_mut);
+            pthread_mutex_lock(&backindex_mut);
             write_index = buffer_back_index;
             if (buffer_back_index < buffer_size - 1)
                 buffer_back_index++;
             else
                 buffer_back_index = 0;
-            phtread_mutex_unlock(&backindex_mut);
+            pthread_mutex_lock(&backindex_mut);
 
             buffer[write_index] = message;
-            phtread_mutex_lock(&balance_mut);
+            pthread_mutex_lock(&balance_mut);
             balance++;
-            phtread_mutex_unlock(&balance_mut);
+            pthread_mutex_lock(&balance_mut);
         }
     }
+    return NULL;
 }
 
 int main(int argc, char *argv[], char *envp[])
 {
     start_time = time(NULL);
-    if (argc != 4 && argv != 6)
+    char *fifo_name;
+    if (argc != 4 && argc != 6)
     {
         print_usage();
         error(EXIT_FAILURE, EINVAL, "incorrect number of arguments");
@@ -201,11 +229,11 @@ int main(int argc, char *argv[], char *envp[])
             error(EXIT_FAILURE, EINVAL, "invalid time");
         }
 
-        char *fifo_name = argv[5];
+        fifo_name = argv[5];
     }
     else
     {
-        char *fifo_name = argv[3];
+        fifo_name = argv[3];
         buffer_size = DEFAULT_BUFFER_SIZE;
     }
 
@@ -213,8 +241,7 @@ int main(int argc, char *argv[], char *envp[])
 
     if (mkfifo(fifo_name, 0666) != OK)
     {
-        perror("cannot create public fifo");
-        return NULL;
+        error(EXIT_FAILURE, errno, "cannot create public fifo");
     }
 
     while ((np = open(fifo_name, O_RDONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) <= nsecs)
@@ -226,7 +253,6 @@ int main(int argc, char *argv[], char *envp[])
     }
 
     pthread_t tid;
-    int current_rid = 0;
     int errn;
     Message *arg;
 
@@ -250,7 +276,15 @@ int main(int argc, char *argv[], char *envp[])
                 //Close
             }
         }
+        if ((read_no == 0 || read_no == -1) && (time(NULL) - start_time) > nsecs)
+        {
+            close(np);
+            pthread_mutex_destroy(&balance_mut);
+            pthread_mutex_destroy(&backindex_mut);
+            continue;
+        }
         // received message, create producer thread
+        operation_register(RECVD, msg);
         *arg = msg;
         if ((errn = pthread_create(&tid, NULL, producer, arg)) != OK) // create producer thread
         {
@@ -262,4 +296,5 @@ int main(int argc, char *argv[], char *envp[])
     pthread_mutex_destroy(&balance_mut);
     pthread_mutex_destroy(&backindex_mut);
     close(np);
+    return EXIT_SUCCESS;
 }
