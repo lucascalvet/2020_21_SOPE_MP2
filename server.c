@@ -85,22 +85,28 @@ void *consumer(void *arg)
 {
     unsigned bal;
     Message msg;
-    while ((time(NULL) - start_time) <= nsecs)
+    while (true)
     {
         pthread_mutex_lock(&balance_mut);
         bal = balance;
         pthread_mutex_unlock(&balance_mut);
+        
         if (bal > 0)
         {
+            printf("T: %ld -> Bal: %u \n", time(NULL), bal);
             msg = buffer[buffer_front_index];
             buffer_front_index++;
             if (buffer_front_index == buffer_size)
                 buffer_front_index -= buffer_size;
+            pthread_mutex_lock(&balance_mut);
+            balance--;
+            pthread_mutex_unlock(&balance_mut);
 
             char private_fifo_name[PF_MAX_CHARS];
             if (snprintf(private_fifo_name, sizeof(private_fifo_name), "/tmp/%d.%lu", msg.pid, msg.tid) < 0)
             {
                 perror("snprintf failed");
+                printf("CONSUMER_EXIT_1 -> errno: %d \n", errno);
                 return NULL;
             }
             int pnp;
@@ -109,52 +115,44 @@ void *consumer(void *arg)
                 if (errno != EWOULDBLOCK)
                 {
                     //if (!server_closed)
+                    printf("CONSUMER_EXIT_2 -> errno: %d \n", errno);
                     perror("cannot open private fifo");
-                    return NULL;
+                    //return NULL;
+                }
+                if (errno == ENXIO)
+                {
+                    break;
                 }
             }
             msg.pid = getpid();
             msg.tid = pthread_self();
             int write_no = 0;
-            while ((write_no = write(pnp, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs)
+            while (pnp != -1 && (write_no = write(pnp, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs)
             {
                 if (write_no == -1 && errno != EAGAIN)
                 {
-                    close(pnp);
                     //if (!server_closed)
+                    printf("CONSUMER_EXIT_3 -> errno: %d \n", errno);
                     perror("cannot write to private fifo");
-                    return NULL;
+                    //return NULL;
                 }
             }
+            close(pnp);
 
-            if ((write_no == 0 || write_no == -1) && (time(NULL) - start_time) > nsecs)
+            if (write_no == 0 || write_no == -1)
             {
                 operation_register(FAILD, msg);
-                close(pnp);
-                return NULL;
+                //return NULL;
             }
-
-            operation_register(TSKDN, msg);
-
-            pthread_mutex_lock(&balance_mut);
-            balance--;
-            pthread_mutex_unlock(&balance_mut);
+            else if (msg.tskres == -1)
+            {
+                operation_register(TLATE, msg);
+            }
+            else
+            {
+                operation_register(TSKDN, msg);
+            }
         }
-    }
-    pthread_mutex_lock(&balance_mut);
-        bal = balance;
-    pthread_mutex_unlock(&balance_mut);
-    while (bal > 0)
-    {
-        msg = buffer[buffer_front_index];
-        buffer_front_index++;
-        if (buffer_front_index == buffer_size)
-            buffer_front_index -= buffer_size;
-        operation_register(TLATE, msg);
-        pthread_mutex_lock(&balance_mut);
-        balance--;
-        bal = balance;
-        pthread_mutex_unlock(&balance_mut);
     }
     return NULL;
 }
@@ -164,15 +162,23 @@ void *producer(void *arg)
     unsigned bal;
     unsigned write_index;
     Message message = *(Message *)arg;
+    if ((time(NULL) - start_time) <= nsecs)
+    {
+        message.tskres = task(message.tskload);
+        Message tskres_msg = message;
+        tskres_msg.pid = getpid();
+        tskres_msg.tid = pthread_self();
+        operation_register(TSKEX, tskres_msg);
+    }
+    else
+    {
+        message.tskres = -1;
+    }
 
-    message.tskres = task(message.tskload);
-    operation_register(TSKEX, message);
-    while ((time(NULL) - start_time) <= nsecs)
+    while (true)
     {
         pthread_mutex_lock(&balance_mut);
         bal = balance;
-        pthread_mutex_lock(&balance_mut);
-
         if (bal < buffer_size)
         {
             pthread_mutex_lock(&backindex_mut);
@@ -181,14 +187,16 @@ void *producer(void *arg)
                 buffer_back_index++;
             else
                 buffer_back_index = 0;
-            pthread_mutex_lock(&backindex_mut);
+            pthread_mutex_unlock(&backindex_mut);
 
             buffer[write_index] = message;
-            pthread_mutex_lock(&balance_mut);
             balance++;
-            pthread_mutex_lock(&balance_mut);
+            pthread_mutex_unlock(&balance_mut);
+            break;
         }
+        pthread_mutex_unlock(&balance_mut);
     }
+
     return NULL;
 }
 
@@ -278,23 +286,25 @@ int main(int argc, char *argv[], char *envp[])
         }
         if ((read_no == 0 || read_no == -1) && (time(NULL) - start_time) > nsecs)
         {
-            close(np);
-            pthread_mutex_destroy(&balance_mut);
-            pthread_mutex_destroy(&backindex_mut);
-            continue;
+            break;
         }
         // received message, create producer thread
         operation_register(RECVD, msg);
         *arg = msg;
-        if ((errn = pthread_create(&tid, NULL, producer, arg)) != OK) // create producer thread
-        {
-            error(EXIT_FAILURE, errn, "cannot create a producer thread");
-        }
+        int tries = 20;
+        do {
+        errn = pthread_create(&tid, NULL, producer, arg); // create producer thread
+        if (errn != OK) error(0, errn, "cannot create a producer thread");
+        tries--;
+        } while(errn != OK && tries > 0);
     }
 
+    unlink(fifo_name);
+    printf("read_no: %d\n", read_no = read(np, &msg, sizeof(Message)));
+    close(np);
+    if (errno == EAGAIN) printf("EAGAIN\n");
     //Finish
     pthread_mutex_destroy(&balance_mut);
     pthread_mutex_destroy(&backindex_mut);
-    close(np);
     return EXIT_SUCCESS;
 }
