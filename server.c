@@ -15,7 +15,8 @@
 
 #define OK 0
 #define DEFAULT_BUFFER_SIZE 10
-#define PF_MAX_CHARS 40
+#define PF_MAX_CHARS 100
+#define LATE_SECS 10
 
 enum Operation
 {
@@ -110,24 +111,33 @@ void *consumer(void *arg)
                 return NULL;
             }
             int pnp;
-            while ((pnp = open(private_fifo_name, O_WRONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) <= nsecs)
+            while ((pnp = open(private_fifo_name, O_WRONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) <= nsecs + LATE_SECS)
+            //while ((pnp = open(private_fifo_name, O_WRONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) <= nsecs)
+            //while ((pnp = open(private_fifo_name, O_WRONLY | O_NONBLOCK)) < 0)
             {
-                if (errno != EWOULDBLOCK)
+                if (errno != EWOULDBLOCK && errno != ENXIO)
+                //if (errno != EWOULDBLOCK)
                 {
                     //if (!server_closed)
                     printf("CONSUMER_EXIT_2 -> errno: %d \n", errno);
                     perror("cannot open private fifo");
                     //return NULL;
                 }
+                
+                /*
                 if (errno == ENXIO)
                 {
                     break;
                 }
+                */
+                
             }
             msg.pid = getpid();
             msg.tid = pthread_self();
             int write_no = 0;
-            while (pnp != -1 && (write_no = write(pnp, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs)
+            while (pnp != -1 && (write_no = write(pnp, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs + LATE_SECS)
+            //while (pnp != -1 && (write_no = write(pnp, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs)
+            //while (pnp != -1 && (write_no = write(pnp, &msg, sizeof(Message))) <= 0)
             {
                 if (write_no == -1 && errno != EAGAIN)
                 {
@@ -141,6 +151,7 @@ void *consumer(void *arg)
 
             if (write_no == 0 || write_no == -1)
             {
+                if((time(NULL) - start_time) > nsecs) printf("EXTRA_TIME -> task_res: %d | write_no: %d | errno: %d\n", msg.tskres, write_no, errno);
                 operation_register(FAILD, msg);
                 //return NULL;
             }
@@ -271,6 +282,7 @@ int main(int argc, char *argv[], char *envp[])
 
     Message msg;
     int read_no;
+    int tries = 20;
     while ((time(NULL) - start_time) <= nsecs)
     {
         arg = (Message *)malloc(sizeof(Message));
@@ -291,7 +303,7 @@ int main(int argc, char *argv[], char *envp[])
         // received message, create producer thread
         operation_register(RECVD, msg);
         *arg = msg;
-        int tries = 20;
+        
         do {
         errn = pthread_create(&tid, NULL, producer, arg); // create producer thread
         if (errn != OK) error(0, errn, "cannot create a producer thread");
@@ -301,6 +313,37 @@ int main(int argc, char *argv[], char *envp[])
 
     unlink(fifo_name);
     printf("read_no: %d\n", read_no = read(np, &msg, sizeof(Message)));
+    
+    int temp_counter = 0;
+    int temp_counter_threads = 0;
+
+    do{
+        if(temp_counter == 0) printf("FINAL LOOP\n");
+        read_no = read(np, &msg, sizeof(Message));
+        
+        if(read_no > 0){
+            operation_register(RECVD, msg);
+            *arg = msg;
+
+            do {
+            errn = pthread_create(&tid, NULL, producer, arg); // create producer thread
+            if (errn != OK) error(0, errn, "cannot create a producer thread");
+            else temp_counter_threads++;
+            tries--;
+            } while(errn != OK && tries > 0);
+        }
+        
+        temp_counter++;
+
+    } while(((read_no != 0 && read_no != -1) || errno == EAGAIN) && (time(NULL) - start_time) <= nsecs + LATE_SECS);
+
+    if((time(NULL) - start_time) <= nsecs + LATE_SECS) {
+        printf("OUT OF FINAL LOOP -> read_no: %d | errno: %d\n", read_no, errno);
+    }
+    else printf("FINAL TIMEOUT\n");
+    printf("OUT OF FINAL LOOP -> nFinalLoops: %d | nThreads: %d\n", temp_counter, temp_counter_threads);
+
+    sleep(3);
     close(np);
     if (errno == EAGAIN) printf("EAGAIN\n");
     //Finish
