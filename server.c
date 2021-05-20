@@ -91,10 +91,9 @@ void *consumer(void *arg)
         pthread_mutex_lock(&balance_mut);
         bal = balance;
         pthread_mutex_unlock(&balance_mut);
-        
+
         if (bal > 0)
         {
-            printf("T: %ld -> Bal: %u \n", time(NULL), bal);
             msg = buffer[buffer_front_index];
             buffer_front_index++;
             if (buffer_front_index == buffer_size)
@@ -111,47 +110,32 @@ void *consumer(void *arg)
                 return NULL;
             }
             int pnp;
-            while ((pnp = open(private_fifo_name, O_WRONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) <= nsecs + LATE_SECS)
-            //while ((pnp = open(private_fifo_name, O_WRONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) <= nsecs)
-            //while ((pnp = open(private_fifo_name, O_WRONLY | O_NONBLOCK)) < 0)
+            while ((pnp = open(private_fifo_name, O_WRONLY | O_NONBLOCK)) < 0)
             {
-                if (errno != EWOULDBLOCK && errno != ENXIO)
-                //if (errno != EWOULDBLOCK)
+                if (errno != EWOULDBLOCK && errno != ENXIO && errno != ENOENT)
                 {
-                    //if (!server_closed)
-                    printf("CONSUMER_EXIT_2 -> errno: %d \n", errno);
                     perror("cannot open private fifo");
-                    //return NULL;
                 }
-                
-                /*
-                if (errno == ENXIO)
+
+                if (errno == ENOENT)
                 {
                     break;
                 }
-                */
-                
             }
             msg.pid = getpid();
             msg.tid = pthread_self();
             int write_no = 0;
-            while (pnp != -1 && (write_no = write(pnp, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs + LATE_SECS)
-            //while (pnp != -1 && (write_no = write(pnp, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs)
-            //while (pnp != -1 && (write_no = write(pnp, &msg, sizeof(Message))) <= 0)
+            while (pnp != -1 && (write_no = write(pnp, &msg, sizeof(Message))) <= 0)
             {
                 if (write_no == -1 && errno != EAGAIN)
                 {
-                    //if (!server_closed)
-                    printf("CONSUMER_EXIT_3 -> errno: %d \n", errno);
                     perror("cannot write to private fifo");
-                    //return NULL;
                 }
             }
             close(pnp);
 
             if (write_no == 0 || write_no == -1)
             {
-                if((time(NULL) - start_time) > nsecs) printf("EXTRA_TIME -> task_res: %d | write_no: %d | errno: %d\n", msg.tskres, write_no, errno);
                 operation_register(FAILD, msg);
                 //return NULL;
             }
@@ -173,6 +157,7 @@ void *producer(void *arg)
     unsigned bal;
     unsigned write_index;
     Message message = *(Message *)arg;
+    free(arg);
     if ((time(NULL) - start_time) <= nsecs)
     {
         message.tskres = task(message.tskload);
@@ -275,14 +260,13 @@ int main(int argc, char *argv[], char *envp[])
     int errn;
     Message *arg;
 
-    if ((errn = pthread_create(&tid, NULL, consumer, NULL)) != OK) // create single consumer thread
+    while ((errn = pthread_create(&tid, NULL, consumer, NULL)) != OK) // create single consumer thread
     {
-        error(EXIT_FAILURE, errn, "cannot create a consumer thread");
+        error(0, errn, "cannot create a consumer thread");
     }
 
     Message msg;
     int read_no;
-    int tries = 20;
     while ((time(NULL) - start_time) <= nsecs)
     {
         arg = (Message *)malloc(sizeof(Message));
@@ -303,50 +287,37 @@ int main(int argc, char *argv[], char *envp[])
         // received message, create producer thread
         operation_register(RECVD, msg);
         *arg = msg;
-        
-        do {
-        errn = pthread_create(&tid, NULL, producer, arg); // create producer thread
-        if (errn != OK) error(0, errn, "cannot create a producer thread");
-        tries--;
-        } while(errn != OK && tries > 0);
+
+        // create producer thread
+        while ((errn = pthread_create(&tid, NULL, producer, arg) != OK))
+        {
+            error(0, errn, "cannot create a producer thread");
+        }
     }
 
     unlink(fifo_name);
-    printf("read_no: %d\n", read_no = read(np, &msg, sizeof(Message)));
-    
-    int temp_counter = 0;
-    int temp_counter_threads = 0;
 
-    do{
-        if(temp_counter == 0) printf("FINAL LOOP\n");
+    do
+    {
+        arg = (Message *)malloc(sizeof(Message));
         read_no = read(np, &msg, sizeof(Message));
-        
-        if(read_no > 0){
+
+        if (read_no > 0)
+        {
             operation_register(RECVD, msg);
             *arg = msg;
-
-            do {
-            errn = pthread_create(&tid, NULL, producer, arg); // create producer thread
-            if (errn != OK) error(0, errn, "cannot create a producer thread");
-            else temp_counter_threads++;
-            tries--;
-            } while(errn != OK && tries > 0);
+            // create producer thread
+            while ((errn = pthread_create(&tid, NULL, producer, arg) != OK))
+            {
+                error(0, errn, "cannot create a producer thread");
+            }
         }
-        
-        temp_counter++;
+    } while (((read_no != 0 && read_no != -1) || (read_no == -1 && errno == EAGAIN)));
 
-    } while(((read_no != 0 && read_no != -1) || errno == EAGAIN) && (time(NULL) - start_time) <= nsecs + LATE_SECS);
-
-    if((time(NULL) - start_time) <= nsecs + LATE_SECS) {
-        printf("OUT OF FINAL LOOP -> read_no: %d | errno: %d\n", read_no, errno);
-    }
-    else printf("FINAL TIMEOUT\n");
-    printf("OUT OF FINAL LOOP -> nFinalLoops: %d | nThreads: %d\n", temp_counter, temp_counter_threads);
-
-    sleep(3);
-    close(np);
-    if (errno == EAGAIN) printf("EAGAIN\n");
+    sleep(1);
     //Finish
+    close(np);
+    free(buffer);
     pthread_mutex_destroy(&balance_mut);
     pthread_mutex_destroy(&backindex_mut);
     return EXIT_SUCCESS;
