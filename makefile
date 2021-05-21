@@ -13,4 +13,4 @@ lib.o: lib.c lib.h
 	gcc -Wall -c -o lib.o lib.c
 
 clean:
-	rm -f s c server.o
+	rm -f s c server.o lib.o
