@@ -28,14 +28,17 @@
 
 ## Notes
 
-- A `fifoname` containing spaces must be enclosed in quotes or escaped with a backslash for each blank space.
+- `client.c` is the client developed by us, while `client_provided.c` is the one provided to us by the teacher to support the development of the server.
 
 - If a request thread raises an unexpected error, we ignore the request and terminate said thread.
+
+- On the server, we used mutexes with index variables to manage the warehouse (buffer) access.
+
+- A `fifoname` containing spaces must be enclosed in quotes or escaped with a backslash for each blank space.
 
 - For error handling, we use the `error()` function to print to `stderr` a description of the error.
 
 - For testing with the shell script, run `./script.sh <test_no>` with `test_no` between 1 and 3 (`./script.sh clean` for cleaning the log files).
-
 
 ## Authorship / Participation
 
