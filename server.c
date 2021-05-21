@@ -11,12 +11,11 @@
 #include <pthread.h>
 #include <signal.h>
 #include "./common.h"
-#include "lib.h"
+#include "./lib.h"
 
 #define OK 0
 #define DEFAULT_BUFFER_SIZE 10
 #define PF_MAX_CHARS 100
-#define LATE_SECS 10
 
 enum Operation
 {
@@ -28,7 +27,6 @@ enum Operation
 };
 
 static pthread_mutex_t balance_mut = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t backindex_mut = PTHREAD_MUTEX_INITIALIZER;
 static int np;
 static time_t start_time;
 static time_t nsecs;
@@ -86,12 +84,14 @@ void *consumer(void *arg)
 {
     unsigned bal;
     Message msg;
-    while (true)
+    while (true) // Handle messages in the buffer until the program ends
     {
+        // Check if there are any messages in the buffer
         pthread_mutex_lock(&balance_mut);
         bal = balance;
         pthread_mutex_unlock(&balance_mut);
 
+        // Handle message in the front of the queue
         if (bal > 0)
         {
             msg = buffer[buffer_front_index];
@@ -105,16 +105,17 @@ void *consumer(void *arg)
             char private_fifo_name[PF_MAX_CHARS];
             if (snprintf(private_fifo_name, sizeof(private_fifo_name), "/tmp/%d.%lu", msg.pid, msg.tid) < 0)
             {
-                perror("snprintf failed");
-                printf("CONSUMER_EXIT_1 -> errno: %d \n", errno);
+                error(0, errno, "snprintf failed");
                 return NULL;
             }
             int pnp;
+            // Open private FIFO
             while ((pnp = open(private_fifo_name, O_WRONLY | O_NONBLOCK)) < 0)
             {
                 if (errno != EWOULDBLOCK && errno != ENXIO && errno != ENOENT)
                 {
-                    perror("cannot open private fifo");
+                    error(0, errno, "cannot open private fifo");
+                    return NULL;
                 }
 
                 if (errno == ENOENT)
@@ -125,25 +126,26 @@ void *consumer(void *arg)
             msg.pid = getpid();
             msg.tid = pthread_self();
             int write_no = 0;
+            // Try writing to private FIFO
             while (pnp != -1 && (write_no = write(pnp, &msg, sizeof(Message))) <= 0)
             {
                 if (write_no == -1 && errno != EAGAIN)
                 {
-                    perror("cannot write to private fifo");
+                    error(0, errno, "cannot write to private fifo");
+                    return NULL;
                 }
             }
             close(pnp);
 
-            if (write_no == 0 || write_no == -1)
+            if (write_no == 0 || write_no == -1) // FAILD, client has closed
             {
                 operation_register(FAILD, msg);
-                //return NULL;
             }
-            else if (msg.tskres == -1)
+            else if (msg.tskres == -1) // 2LATE, server has timed out
             {
                 operation_register(TLATE, msg);
             }
-            else
+            else // TSKDN, server has sent the result successfully
             {
                 operation_register(TSKDN, msg);
             }
@@ -158,6 +160,7 @@ void *producer(void *arg)
     unsigned write_index;
     Message message = *(Message *)arg;
     free(arg);
+    // Check if the server has timed out
     if ((time(NULL) - start_time) <= nsecs)
     {
         message.tskres = task(message.tskload);
@@ -171,20 +174,19 @@ void *producer(void *arg)
         message.tskres = -1;
     }
 
+    // Put the result in the back of the queue (buffer), waiting until it has free space
     while (true)
     {
         pthread_mutex_lock(&balance_mut);
         bal = balance;
         if (bal < buffer_size)
         {
-            pthread_mutex_lock(&backindex_mut);
             write_index = buffer_back_index;
             if (buffer_back_index < buffer_size - 1)
                 buffer_back_index++;
             else
                 buffer_back_index = 0;
-            pthread_mutex_unlock(&backindex_mut);
-
+                
             buffer[write_index] = message;
             balance++;
             pthread_mutex_unlock(&balance_mut);
@@ -192,7 +194,6 @@ void *producer(void *arg)
         }
         pthread_mutex_unlock(&balance_mut);
     }
-
     return NULL;
 }
 
@@ -243,11 +244,13 @@ int main(int argc, char *argv[], char *envp[])
 
     buffer = (Message *)malloc(buffer_size * sizeof(Message));
 
+    // Create public FIFO
     if (mkfifo(fifo_name, 0666) != OK)
     {
         error(EXIT_FAILURE, errno, "cannot create public fifo");
     }
 
+    // Open public FIFO, wait for client to open too
     while ((np = open(fifo_name, O_RDONLY | O_NONBLOCK)) < 0 && (time(NULL) - start_time) <= nsecs)
     {
         if (errno != ENOENT && errno != ENXIO && errno != EWOULDBLOCK)
@@ -260,35 +263,34 @@ int main(int argc, char *argv[], char *envp[])
     int errn;
     Message *arg;
 
-    while ((errn = pthread_create(&tid, NULL, consumer, NULL)) != OK) // create single consumer thread
+    // Create single consumer thread
+    while ((errn = pthread_create(&tid, NULL, consumer, NULL)) != OK)
     {
         error(0, errn, "cannot create a consumer thread");
     }
 
     Message msg;
     int read_no;
+    // While not timed out, handle requests
     while ((time(NULL) - start_time) <= nsecs)
     {
         arg = (Message *)malloc(sizeof(Message));
-        //Read
-        while ((read_no = read(np, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs) //block while not timed out
+        // Read from public FIFO, wait for request while not timed out
+        while ((read_no = read(np, &msg, sizeof(Message))) <= 0 && (time(NULL) - start_time) <= nsecs)
         {
             if (read_no == -1 && errno != EAGAIN)
             {
-                close(np);
-                perror("cannot read public fifo");
-                //Close
+                error(0, errno, "cannot read public fifo");
             }
         }
         if ((read_no == 0 || read_no == -1) && (time(NULL) - start_time) > nsecs)
         {
             break;
         }
-        // received message, create producer thread
+
+        // Received message, create producer thread
         operation_register(RECVD, msg);
         *arg = msg;
-
-        // create producer thread
         while ((errn = pthread_create(&tid, NULL, producer, arg) != OK))
         {
             error(0, errn, "cannot create a producer thread");
@@ -297,6 +299,7 @@ int main(int argc, char *argv[], char *envp[])
 
     unlink(fifo_name);
 
+    // Handle any remaining requests in the public FIFO, to send them 2LATE
     do
     {
         arg = (Message *)malloc(sizeof(Message));
@@ -304,9 +307,9 @@ int main(int argc, char *argv[], char *envp[])
 
         if (read_no > 0)
         {
+            // Received message, create producer thread
             operation_register(RECVD, msg);
             *arg = msg;
-            // create producer thread
             while ((errn = pthread_create(&tid, NULL, producer, arg) != OK))
             {
                 error(0, errn, "cannot create a producer thread");
@@ -314,11 +317,10 @@ int main(int argc, char *argv[], char *envp[])
         }
     } while (((read_no != 0 && read_no != -1) || (read_no == -1 && errno == EAGAIN)));
 
+    // Cleanup and finish
     sleep(1);
-    //Finish
     close(np);
     free(buffer);
     pthread_mutex_destroy(&balance_mut);
-    pthread_mutex_destroy(&backindex_mut);
     return EXIT_SUCCESS;
 }
